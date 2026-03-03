@@ -54,6 +54,7 @@ void create_condition_screen();
 void create_log_screen();
 void create_settings_screen();
 void create_about_screen();
+void create_map_screen();
 
 // ===== LVGL flush =====
 void lv_flush_cb(lv_display_t* disp, const lv_area_t* area, uint8_t* color_p) {
@@ -87,15 +88,21 @@ void add_back_button(lv_obj_t* parent) {
   lv_obj_align(btn, LV_ALIGN_BOTTOM_MID, 0, -10);
   lv_obj_set_size(btn, 120, 40);
 
+  // Green button style
+  lv_obj_set_style_bg_color(btn, lv_color_hex(0x00FF00), LV_PART_MAIN);
+  lv_obj_set_style_bg_opa(btn, LV_OPA_COVER, LV_PART_MAIN);
+  lv_obj_set_style_border_width(btn, 2, LV_PART_MAIN);
+  lv_obj_set_style_border_color(btn, lv_color_hex(0x00AA00), LV_PART_MAIN);
+
   lv_obj_t* label = lv_label_create(btn);
   lv_label_set_text(label, "Back");
   lv_obj_center(label);
+  lv_obj_set_style_text_color(label, lv_color_hex(0x000000), LV_PART_MAIN);
 
   lv_obj_add_event_cb(btn, back_to_menu, LV_EVENT_CLICKED, NULL);
 }
 
 // ===== Screens =====
-
 void create_condition_screen() {
   lv_obj_t* screen = lv_obj_create(NULL);
   lv_obj_set_style_bg_color(screen, lv_color_hex(0x111111), LV_PART_MAIN);
@@ -105,7 +112,6 @@ void create_condition_screen() {
   lv_obj_align(label, LV_ALIGN_TOP_MID, 0, 20);
 
   add_back_button(screen);
-
   lv_screen_load(screen);
 }
 
@@ -118,7 +124,6 @@ void create_log_screen() {
   lv_obj_align(label, LV_ALIGN_TOP_MID, 0, 20);
 
   add_back_button(screen);
-
   lv_screen_load(screen);
 }
 
@@ -131,7 +136,6 @@ void create_settings_screen() {
   lv_obj_align(label, LV_ALIGN_TOP_MID, 0, 20);
 
   add_back_button(screen);
-
   lv_screen_load(screen);
 }
 
@@ -144,7 +148,19 @@ void create_about_screen() {
   lv_obj_align(label, LV_ALIGN_TOP_MID, 0, 20);
 
   add_back_button(screen);
+  lv_screen_load(screen);
+}
 
+// ===== Map Screen =====
+void create_map_screen() {
+  lv_obj_t* screen = lv_obj_create(NULL);
+  lv_obj_set_style_bg_color(screen, lv_color_hex(0x111111), LV_PART_MAIN);
+
+  lv_obj_t* label = lv_label_create(screen);
+  lv_label_set_text(label, "Map Screen");
+  lv_obj_align(label, LV_ALIGN_TOP_MID, 0, 20);
+
+  add_back_button(screen);
   lv_screen_load(screen);
 }
 
@@ -162,6 +178,8 @@ void on_menu_button(lv_event_t* e) {
     create_settings_screen();
   else if (strcmp(btn_text, "About") == 0)
     create_about_screen();
+  else if (strcmp(btn_text, "Map") == 0)
+    create_map_screen();
 }
 
 // ===== Main Menu =====
@@ -178,30 +196,38 @@ void create_main_menu() {
   const char* menu_buttons[] = {
     "Condition Test",
     "Log Catch",
+    "Map",
     "Settings",
     "About"
+       
   };
 
-  lv_obj_t* prev_btn = NULL;
+  lv_obj_t* prev_btn = nullptr;
+  int start_y = 60;   // vertical offset from top
+  int spacing = 20;   // space between buttons
 
-  for (int i = 0; i < 4; i++) {
-    lv_obj_t* btn = lv_button_create(screen);
+  for (int i = 0; i < 5; i++) {
+      lv_obj_t* btn = lv_button_create(screen);
+      lv_obj_set_size(btn, 200, 40);  // uniform size
 
-    if (!prev_btn)
-      lv_obj_align(btn, LV_ALIGN_TOP_LEFT, 10, 60);
-    else
-      lv_obj_align_to(btn, prev_btn, LV_ALIGN_OUT_BOTTOM_LEFT, 0, 20);
+      if (!prev_btn)
+          lv_obj_align(btn, LV_ALIGN_TOP_MID, 0, start_y); // first button
+      else
+          lv_obj_align_to(btn, prev_btn, LV_ALIGN_OUT_BOTTOM_MID, 0, spacing); // below previous, centered
 
-    lv_obj_set_style_bg_color(btn, lv_color_hex(0x00FF00), LV_PART_MAIN);
+      lv_obj_set_style_bg_color(btn, lv_color_hex(0x00FF00), LV_PART_MAIN);
+      lv_obj_set_style_bg_opa(btn, LV_OPA_COVER, LV_PART_MAIN);
+      lv_obj_set_style_border_width(btn, 2, LV_PART_MAIN);
+      lv_obj_set_style_border_color(btn, lv_color_hex(0x00AA00), LV_PART_MAIN);
 
-    lv_obj_t* label = lv_label_create(btn);
-    lv_label_set_text(label, menu_buttons[i]);
-    lv_obj_set_style_text_color(label, lv_color_hex(0x000000), LV_PART_MAIN);
-    lv_obj_center(label);
+      lv_obj_t* label = lv_label_create(btn);
+      lv_label_set_text(label, menu_buttons[i]);
+      lv_obj_center(label);
+      lv_obj_set_style_text_color(label, lv_color_hex(0x000000), LV_PART_MAIN);
 
-    lv_obj_add_event_cb(btn, on_menu_button, LV_EVENT_CLICKED, NULL);
+      lv_obj_add_event_cb(btn, on_menu_button, LV_EVENT_CLICKED, NULL);
 
-    prev_btn = btn;
+      prev_btn = btn;
   }
 
   lv_screen_load(screen);
