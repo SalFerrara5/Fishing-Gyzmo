@@ -1,199 +1,202 @@
-# Fishing-Gyzmo
-Fishing Gyzmo is a touchscreen-based fishing companion device built on an ESP32 using LVGL and a 2 inch ST7789 display. It provides an interactive menu system designed for logging catches, running condition checks, and managing fishing data in a compact, standalone unit.
+# 🎣 Fishing Gyzmo
 
-The goal is to create a dedicated, purpose-built tool instead of relying on a phone app. It boots straight into a clean interface and is designed to feel like a finished product, not a dev board.
+Fishing Gyzmo is a touchscreen-based fishing companion built on an ESP32 using LVGL and a 2" ST7789 display. It provides a clean, responsive interface for logging catches, testing conditions, and managing fishing data in a standalone device.
 
-Hardware
+The goal is simple: a dedicated tool that boots instantly and feels like real hardware, not a phone app.
 
-ESP32 (tested on ESP32 with VSPI)
+---
 
-240x320 ST7789 display
+## 📦 Features
 
-CST820 capacitive touch controller
+* Dark themed LVGL v9 interface
+* Custom title font support
+* Touchscreen button menu
+* Adjustable display backlight
+* Modular screen system
+* Serial debugging output
+* Designed for future expansion (WiFi, logging, sensors)
 
-Backlight connected to GPIO 27 (PWM controlled)
+Planned modules:
 
-Pin Configuration (current build)
+* Condition Test
+* Log Catch
+* Settings
+* Catch History
+* Weather integration
 
-Display:
+---
 
-SCLK: GPIO 14
+## 🛠 Hardware
 
-MOSI: GPIO 13
+* ESP32 (VSPI used)
+* 240x320 ST7789 display
+* CST820 capacitive touch controller
+* PWM-controlled backlight
 
-DC: GPIO 2
+### Pin Configuration (Current Build)
 
-CS: GPIO 15
+**Display**
 
-Backlight: GPIO 27
+* SCLK → GPIO 14
+* MOSI → GPIO 13
+* DC → GPIO 2
+* CS → GPIO 15
+* Backlight → GPIO 27
 
-Touch:
+**Touch**
 
-SDA: GPIO 33
+* SDA → GPIO 33
+* SCL → GPIO 32
+* RST → GPIO 25
+* INT → GPIO 21
 
-SCL: GPIO 32
+If your wiring differs, update the SPI configuration and CST820 constructor in the sketch.
 
-RST: GPIO 25
+---
 
-INT: GPIO 21
+## 🧰 Software Stack
 
-If you use different pins, edit the SPI and touch configuration in the display class and CST820 constructor.
+* LVGL v9
+* LovyanGFX
+* CST820 driver
+* Arduino framework
 
-Software Stack
+Important: Custom fonts must be generated for LVGL v9. Fonts generated for earlier versions will not compile without modification.
 
-LVGL v9
+---
 
-LovyanGFX
-
-CST820 touch driver
-
-Arduino framework
-
-Important: Custom fonts must be generated for LVGL v9 or manually adjusted for v9 compatibility.
-
-Current Features
-
-Dark themed UI
-
-Custom title font
-
-Centered title: “Fishing Gyzmo”
-
-Touchscreen button menu
-
-Adjustable backlight slider
-
-Clean left-aligned layout
-
-Serial debugging output
-
-Planned feature modules:
-
-Condition Test
-
-Log Catch
-
-Settings
-
-Catch History
-
-Possibly weather integration (WiFi based)
-
-UI Structure
+## 🖥 UI Structure
 
 The interface is built using LVGL objects:
 
-Screen root object
+* Root screen object
+* Title label
+* Vertically stacked buttons
+* Event callbacks for interaction
 
-Title label
+To add a new button:
 
-Button objects stacked vertically
-
-Event callbacks for touch interaction
-
-To add a new menu button:
-
-Create a button using lv_button_create()
-
-Align it below the previous object
-
-Add an event callback with lv_obj_add_event_cb()
-
-Attach a label with lv_label_create()
-
-Example:
-
+```cpp
 lv_obj_t* btn = lv_button_create(lv_screen_active());
 lv_obj_align(btn, LV_ALIGN_TOP_LEFT, 10, 80);
 lv_obj_add_event_cb(btn, my_callback, LV_EVENT_CLICKED, NULL);
-Customizing the UI
-Change Background Color
+
+lv_obj_t* label = lv_label_create(btn);
+lv_label_set_text(label, "New Button");
+lv_obj_center(label);
+```
+
+---
+
+## 🎨 Customization
+
+### Change Background Color
+
+```cpp
 lv_obj_set_style_bg_color(lv_screen_active(),
                           lv_color_hex(0x222222),
                           LV_PART_MAIN);
+```
 
-Replace hex value as needed.
+---
 
-Change Button Color
+### Change Button Color
+
+```cpp
 lv_obj_set_style_bg_color(btn,
                           lv_color_hex(0x00AA00),
                           LV_PART_MAIN);
+```
 
-You can also modify pressed state styling using LV_PART_MAIN | LV_STATE_PRESSED.
+You can also style pressed state:
 
-Change Fonts
+```cpp
+lv_obj_set_style_bg_color(btn,
+                          lv_color_hex(0x007700),
+                          LV_PART_MAIN | LV_STATE_PRESSED);
+```
 
-Generate a font using the LVGL font converter.
+---
 
-Include the .h file in the project.
+### Using Custom Fonts
 
-Assign the font:
+1. Generate a font using the LVGL font converter
+2. Ensure a **space character is included** if limiting symbols
+3. Place the generated `.h` file in the sketch folder
+4. Include it:
 
+```cpp
+#include "my_font_28.h"
+```
+
+5. Apply it to a label:
+
+```cpp
 lv_obj_set_style_text_font(title, &my_font_28, LV_PART_MAIN);
+```
 
-Important:
+If compilation fails, remove `.static_bitmap` from the font struct and ensure the struct matches LVGL v9 format.
 
-Make sure space character is included if limiting symbols.
+---
 
-If compilation fails, remove .static_bitmap from the font struct for LVGL v9.
+## ⚡ Performance Tips
 
-Improve Performance
+If the UI feels slow:
 
-If UI feels sluggish:
+* Increase SPI write frequency in LovyanGFX config
+* Increase LVGL buffer size:
 
-Increase SPI write frequency in LovyanGFX config.
-
-Increase LVGL draw buffer size:
-
+```cpp
 static lv_color_t buf1[240 * 20];
+```
 
-Reduce unnecessary Serial printing.
+* Reduce unnecessary Serial printing
+* Avoid heavy logic inside event callbacks
 
-Avoid heavy operations inside event callbacks.
+---
 
-Project Philosophy
-
-This is a dedicated tool, not a phone replacement. It should:
-
-Boot fast
-
-Respond instantly
-
-Be readable in sunlight
-
-Feel like purpose-built hardware
-
-The UI is intentionally simple and structured. Clean layout, large tap targets, no clutter.
-
-Future Expansion Ideas
-
-EEPROM or Preferences-based data storage
-
-SD card logging
-
-GPS module integration
-
-Barometric pressure tracking
-
-Moon phase calculations
-
-WiFi time sync
-
-Data export over USB
-
-How to Extend the Code
+## 🔧 Screen Navigation Structure
 
 Each feature should live in its own function:
 
-create_main_menu()
+```cpp
+void create_main_menu();
+void create_log_screen();
+void create_settings_screen();
+```
 
-create_log_screen()
+To switch screens:
 
-create_settings_screen()
-
-Switch screens by cleaning the active screen:
-
+```cpp
 lv_obj_clean(lv_screen_active());
 create_log_screen();
+```
 
-This keeps things modular and easier to scale.
+This keeps the code modular and easier to expand.
+
+---
+
+## 🚀 Future Expansion Ideas
+
+* EEPROM / Preferences storage
+* SD card logging
+* GPS integration
+* Barometric pressure sensor
+* Moon phase calculations
+* WiFi time sync
+* USB data export
+
+---
+
+## 📜 Project Philosophy
+
+Fishing Gyzmo is meant to be:
+
+* Fast
+* Simple
+* Readable outdoors
+* Purpose-built
+
+No clutter. No unnecessary animations. Just a clean interface that works every time.
+
+---
