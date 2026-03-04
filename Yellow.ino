@@ -2,6 +2,9 @@
 #include "CST820.h"
 #include <lvgl.h>
 #include "my_font_28.h"
+#include "FS.h"
+#include "SD.h"
+#include "SPI.h"
 
 // ===== Display Setup =====
 class LGFX_JustDisplay : public lgfx::LGFX_Device {
@@ -55,6 +58,7 @@ void create_log_screen();
 void create_settings_screen();
 void create_about_screen();
 void create_map_screen();
+void create_view_entries_screen();
 
 // ===== LVGL flush =====
 void lv_flush_cb(lv_display_t* disp, const lv_area_t* area, uint8_t* color_p) {
@@ -83,12 +87,11 @@ void back_to_menu(lv_event_t* e) {
 }
 
 // ===== Helper: Create Back Button =====
-void add_back_button(lv_obj_t* parent) {
+lv_obj_t* add_back_button(lv_obj_t* parent) {
   lv_obj_t* btn = lv_button_create(parent);
-  lv_obj_align(btn, LV_ALIGN_BOTTOM_MID, 0, -10);
-  lv_obj_set_size(btn, 120, 40);
+  lv_obj_set_size(btn, 100, 35);
+  lv_obj_align(btn, LV_ALIGN_BOTTOM_LEFT, 10, -10); // bottom-left corner
 
-  // Green button style
   lv_obj_set_style_bg_color(btn, lv_color_hex(0x00FF00), LV_PART_MAIN);
   lv_obj_set_style_bg_opa(btn, LV_OPA_COVER, LV_PART_MAIN);
   lv_obj_set_style_border_width(btn, 2, LV_PART_MAIN);
@@ -100,29 +103,246 @@ void add_back_button(lv_obj_t* parent) {
   lv_obj_set_style_text_color(label, lv_color_hex(0x000000), LV_PART_MAIN);
 
   lv_obj_add_event_cb(btn, back_to_menu, LV_EVENT_CLICKED, NULL);
+  return btn;
 }
 
-// ===== Screens =====
-void create_condition_screen() {
-  lv_obj_t* screen = lv_obj_create(NULL);
-  lv_obj_set_style_bg_color(screen, lv_color_hex(0x111111), LV_PART_MAIN);
+// ===== SD Logging =====
+void log_catch(String species, String size, String weight) {
+  if (!SD.begin()) { Serial.println("❌ SD mount failed"); return; }
+  File file = SD.open("/catch_log.csv", FILE_APPEND);
+  if (!file) { Serial.println("❌ Cannot open file"); return; }
+  String entry = species + "," + size + "," + weight + "," + String(millis()) + "\n";
+  file.print(entry);
+  file.close();
+  Serial.println("✅ Catch logged");
+}
 
-  lv_obj_t* label = lv_label_create(screen);
-  lv_label_set_text(label, "Condition Test Screen");
-  lv_obj_align(label, LV_ALIGN_TOP_MID, 0, 20);
+// ===== Delete Entry =====
+void delete_entry(const String& line) {
+  if (!SD.begin()) return;
+  File file = SD.open("/catch_log.csv");
+  if (!file) return;
 
-  add_back_button(screen);
-  lv_screen_load(screen);
+  File temp = SD.open("/temp.csv", FILE_WRITE);
+  String l;
+  while (file.available()) {
+    l = file.readStringUntil('\n');
+    if (l != line) temp.println(l);
+  }
+  file.close();
+  temp.close();
+  SD.remove("/catch_log.csv");
+  SD.rename("/temp.csv", "/catch_log.csv");
+}
+
+// ===== Log Catch Screen =====
+lv_obj_t *species_input, *size_input, *weight_input;
+
+struct kb_userdata_t {
+    lv_obj_t* kb;
+    lv_obj_t* submit_btn;
+    lv_obj_t* view_btn; // nullptr for log screen
+    lv_obj_t* back_btn;
+};
+
+// Called when a textarea is focused
+void textarea_focused_cb(lv_event_t* e) {
+    lv_obj_t* ta = (lv_obj_t*)lv_event_get_target(e);
+    kb_userdata_t* ud = (kb_userdata_t*)lv_event_get_user_data(e);
+
+    lv_keyboard_set_textarea(ud->kb, ta);
+    lv_obj_clear_flag(ud->kb, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_move_foreground(ud->kb);
+
+    if(ud->submit_btn) lv_obj_add_flag(ud->submit_btn, LV_OBJ_FLAG_HIDDEN);
+    if(ud->view_btn) lv_obj_add_flag(ud->view_btn, LV_OBJ_FLAG_HIDDEN);
+    if(ud->back_btn) lv_obj_add_flag(ud->back_btn, LV_OBJ_FLAG_HIDDEN);
+
+    lv_obj_scroll_to_view(ta, LV_ANIM_ON);
+}
+
+// Called when keyboard is closed (READY or CANCEL)
+void kb_event_cb(lv_event_t* e) {
+    lv_obj_t* kb = (lv_obj_t*)lv_event_get_target(e);
+    kb_userdata_t* ud = (kb_userdata_t*)lv_event_get_user_data(e);
+
+    lv_obj_add_flag(kb, LV_OBJ_FLAG_HIDDEN);
+
+    if(ud->submit_btn) lv_obj_clear_flag(ud->submit_btn, LV_OBJ_FLAG_HIDDEN);
+    if(ud->view_btn) lv_obj_clear_flag(ud->view_btn, LV_OBJ_FLAG_HIDDEN);
+    if(ud->back_btn) lv_obj_clear_flag(ud->back_btn, LV_OBJ_FLAG_HIDDEN);
 }
 
 void create_log_screen() {
   lv_obj_t* screen = lv_obj_create(NULL);
   lv_obj_set_style_bg_color(screen, lv_color_hex(0x111111), LV_PART_MAIN);
 
-  lv_obj_t* label = lv_label_create(screen);
-  lv_label_set_text(label, "Log Catch Screen");
-  lv_obj_align(label, LV_ALIGN_TOP_MID, 0, 20);
+  lv_obj_t* title_label = lv_label_create(screen);
+  lv_label_set_text(title_label, "Log Catch");
+  lv_obj_align(title_label, LV_ALIGN_TOP_MID, 0, 10);
 
+  // Scrollable container
+  lv_obj_t* cont = lv_obj_create(screen);
+  lv_obj_set_size(cont, 320, 240 - 50);  // leave space for title
+  lv_obj_align(cont, LV_ALIGN_TOP_MID, 0, 30);
+  lv_obj_set_scroll_dir(cont, LV_DIR_VER);
+  lv_obj_set_scrollbar_mode(cont, LV_SCROLLBAR_MODE_AUTO);
+  lv_obj_set_style_bg_color(cont, lv_color_hex(0x111111), LV_PART_MAIN);
+  lv_obj_set_style_border_width(cont, 0, LV_PART_MAIN);
+
+  // Labels and larger inputs
+  species_input = lv_textarea_create(cont);
+  lv_textarea_set_placeholder_text(species_input, "Species");
+  lv_obj_set_size(species_input, 200, 40);  // bigger
+  lv_obj_align(species_input, LV_ALIGN_TOP_LEFT, 10, 10);
+
+  lv_obj_t* species_label = lv_label_create(cont);
+  lv_label_set_text(species_label, "Species:");
+  lv_obj_align_to(species_label, species_input, LV_ALIGN_OUT_LEFT_MID, -70, 0);
+
+  size_input = lv_textarea_create(cont);
+  lv_textarea_set_placeholder_text(size_input, "cm");
+  lv_obj_set_size(size_input, 200, 40);
+  lv_obj_align(size_input, LV_ALIGN_TOP_LEFT, 10, 60);
+
+  lv_obj_t* size_label = lv_label_create(cont);
+  lv_label_set_text(size_label, "Size:");
+  lv_obj_align_to(size_label, size_input, LV_ALIGN_OUT_LEFT_MID, -70, 0);
+
+  weight_input = lv_textarea_create(cont);
+  lv_textarea_set_placeholder_text(weight_input, "kg");
+  lv_obj_set_size(weight_input, 200, 40);
+  lv_obj_align(weight_input, LV_ALIGN_TOP_LEFT, 10, 110);
+
+  lv_obj_t* weight_label = lv_label_create(cont);
+  lv_label_set_text(weight_label, "Weight:");
+  lv_obj_align_to(weight_label, weight_input, LV_ALIGN_OUT_LEFT_MID, -70, 0);
+
+  // Keyboard (hidden by default)
+  lv_obj_t* kb = lv_keyboard_create(screen);
+  lv_obj_set_size(kb, 320, 120);
+  lv_obj_align(kb, LV_ALIGN_BOTTOM_MID, 0, 0);
+  lv_obj_add_flag(kb, LV_OBJ_FLAG_HIDDEN);
+
+  // Submit button bottom-right
+  lv_obj_t* submit_btn = lv_button_create(screen);
+  lv_obj_set_size(submit_btn, 100, 35);
+  lv_obj_align(submit_btn, LV_ALIGN_BOTTOM_RIGHT, -10, -10);
+  lv_obj_set_style_bg_color(submit_btn, lv_color_hex(0x00FF00), LV_PART_MAIN);
+  lv_obj_set_style_bg_opa(submit_btn, LV_OPA_COVER, LV_PART_MAIN);
+  lv_obj_set_style_border_width(submit_btn, 2, LV_PART_MAIN);
+  lv_obj_set_style_border_color(submit_btn, lv_color_hex(0x00AA00), LV_PART_MAIN);
+  lv_obj_t* submit_label = lv_label_create(submit_btn);
+  lv_label_set_text(submit_label, "Submit");
+  lv_obj_center(submit_label);
+
+  lv_obj_add_event_cb(submit_btn, [](lv_event_t* e){
+    log_catch(lv_textarea_get_text(species_input),
+              lv_textarea_get_text(size_input),
+              lv_textarea_get_text(weight_input));
+    lv_textarea_set_text(species_input, "");
+    lv_textarea_set_text(size_input, "");
+    lv_textarea_set_text(weight_input, "");
+  }, LV_EVENT_CLICKED, NULL);
+
+  lv_obj_t* back_btn = add_back_button(screen);
+
+  // Keyboard userdata on heap
+  kb_userdata_t* kb_data = new kb_userdata_t{ kb, submit_btn, nullptr, back_btn };
+  lv_obj_add_event_cb(kb, kb_event_cb, LV_EVENT_READY, kb_data);
+  lv_obj_add_event_cb(kb, kb_event_cb, LV_EVENT_CANCEL, kb_data);
+
+  // Attach keyboard and scroll container to textareas
+  auto textarea_cb = [](lv_event_t* e){
+    lv_obj_t* ta = (lv_obj_t*)lv_event_get_target(e);
+    kb_userdata_t* ud = (kb_userdata_t*)lv_event_get_user_data(e);
+    lv_keyboard_set_textarea(ud->kb, ta);
+    lv_obj_clear_flag(ud->kb, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_move_foreground(ud->kb);
+    if(ud->submit_btn) lv_obj_add_flag(ud->submit_btn, LV_OBJ_FLAG_HIDDEN);
+    if(ud->back_btn) lv_obj_add_flag(ud->back_btn, LV_OBJ_FLAG_HIDDEN);
+
+    // Scroll textarea into view
+    lv_obj_scroll_to_view_recursive(ta, LV_ANIM_ON);
+  };
+
+  lv_obj_add_event_cb(species_input, textarea_cb, LV_EVENT_FOCUSED, kb_data);
+  lv_obj_add_event_cb(size_input, textarea_cb, LV_EVENT_FOCUSED, kb_data);
+  lv_obj_add_event_cb(weight_input, textarea_cb, LV_EVENT_FOCUSED, kb_data);
+
+  lv_screen_load(screen);
+}
+
+// ===== View Entries Screen =====
+void create_view_entries_screen() {
+  lv_obj_t* screen = lv_obj_create(NULL);
+  lv_obj_set_style_bg_color(screen, lv_color_hex(0x111111), LV_PART_MAIN);
+
+  lv_obj_t* title_label = lv_label_create(screen);
+  lv_label_set_text(title_label, "Catch Log");
+  lv_obj_align(title_label, LV_ALIGN_TOP_MID, 0, 10);
+
+  lv_obj_t* cont = lv_obj_create(screen);
+  lv_obj_set_size(cont, 320, 240 - 50);
+  lv_obj_align(cont, LV_ALIGN_TOP_MID, 0, 30);
+  lv_obj_set_scroll_dir(cont, LV_DIR_VER);
+  lv_obj_set_scrollbar_mode(cont, LV_SCROLLBAR_MODE_AUTO);
+  lv_obj_set_style_bg_color(cont, lv_color_hex(0x111111), LV_PART_MAIN);
+  lv_obj_set_style_border_width(cont, 0, LV_PART_MAIN);
+
+  if (!SD.begin()) {
+    lv_label_set_text(lv_label_create(screen), "SD card error");
+    lv_screen_load(screen);
+    return;
+  }
+
+  File file = SD.open("/catch_log.csv");
+  if (!file) {
+    lv_label_set_text(lv_label_create(screen), "No entries");
+    lv_screen_load(screen);
+    return;
+  }
+
+  int y = 0;
+  while (file.available()) {
+    String line = file.readStringUntil('\n');
+
+    lv_obj_t* entry_label = lv_label_create(cont);
+    lv_label_set_text(entry_label, line.c_str());
+    lv_obj_align(entry_label, LV_ALIGN_TOP_LEFT, 10, y);
+
+    lv_obj_t* del_btn = lv_button_create(cont);
+    lv_obj_set_size(del_btn, 60, 30);
+    lv_obj_align(del_btn, LV_ALIGN_TOP_RIGHT, -10, y);
+    lv_obj_set_style_bg_color(del_btn, lv_color_hex(0xFF5555), LV_PART_MAIN);
+
+    lv_obj_t* del_label = lv_label_create(del_btn);
+    lv_label_set_text(del_label, "Del");
+    lv_obj_center(del_label);
+
+    String* line_copy = new String(line);
+    lv_obj_add_event_cb(del_btn, [](lv_event_t* e){
+      String* txt = (String*)lv_event_get_user_data(e);
+      delete_entry(*txt);
+      delete txt;
+      create_view_entries_screen();
+    }, LV_EVENT_CLICKED, line_copy);
+
+    y += 35;
+  }
+  file.close();
+
+  add_back_button(screen);
+  lv_screen_load(screen);
+}
+
+// ===== Other Screens =====
+void create_condition_screen() {
+  lv_obj_t* screen = lv_obj_create(NULL);
+  lv_obj_set_style_bg_color(screen, lv_color_hex(0x111111), LV_PART_MAIN);
+  lv_obj_t* label = lv_label_create(screen);
+  lv_label_set_text(label, "Condition Test Screen");
+  lv_obj_align(label, LV_ALIGN_TOP_MID, 0, 20);
   add_back_button(screen);
   lv_screen_load(screen);
 }
@@ -130,11 +350,9 @@ void create_log_screen() {
 void create_settings_screen() {
   lv_obj_t* screen = lv_obj_create(NULL);
   lv_obj_set_style_bg_color(screen, lv_color_hex(0x111111), LV_PART_MAIN);
-
   lv_obj_t* label = lv_label_create(screen);
   lv_label_set_text(label, "Settings Screen");
   lv_obj_align(label, LV_ALIGN_TOP_MID, 0, 20);
-
   add_back_button(screen);
   lv_screen_load(screen);
 }
@@ -142,24 +360,19 @@ void create_settings_screen() {
 void create_about_screen() {
   lv_obj_t* screen = lv_obj_create(NULL);
   lv_obj_set_style_bg_color(screen, lv_color_hex(0x111111), LV_PART_MAIN);
-
   lv_obj_t* label = lv_label_create(screen);
   lv_label_set_text(label, "About Screen");
   lv_obj_align(label, LV_ALIGN_TOP_MID, 0, 20);
-
   add_back_button(screen);
   lv_screen_load(screen);
 }
 
-// ===== Map Screen =====
 void create_map_screen() {
   lv_obj_t* screen = lv_obj_create(NULL);
   lv_obj_set_style_bg_color(screen, lv_color_hex(0x111111), LV_PART_MAIN);
-
   lv_obj_t* label = lv_label_create(screen);
   lv_label_set_text(label, "Map Screen");
   lv_obj_align(label, LV_ALIGN_TOP_MID, 0, 20);
-
   add_back_button(screen);
   lv_screen_load(screen);
 }
@@ -170,16 +383,12 @@ void on_menu_button(lv_event_t* e) {
   lv_obj_t* label_obj = lv_obj_get_child(target, 0);
   const char* btn_text = lv_label_get_text(label_obj);
 
-  if (strcmp(btn_text, "Condition Test") == 0)
-    create_condition_screen();
-  else if (strcmp(btn_text, "Log Catch") == 0)
-    create_log_screen();
-  else if (strcmp(btn_text, "Settings") == 0)
-    create_settings_screen();
-  else if (strcmp(btn_text, "About") == 0)
-    create_about_screen();
-  else if (strcmp(btn_text, "Map") == 0)
-    create_map_screen();
+  if (strcmp(btn_text, "Condition Test") == 0) create_condition_screen();
+  else if (strcmp(btn_text, "Log Catch") == 0) create_log_screen();
+  else if (strcmp(btn_text, "Settings") == 0) create_settings_screen();
+  else if (strcmp(btn_text, "About") == 0) create_about_screen();
+  else if (strcmp(btn_text, "Map") == 0) create_map_screen();
+  else if (strcmp(btn_text, "View Entries") == 0) create_view_entries_screen();
 }
 
 // ===== Main Menu =====
@@ -193,41 +402,32 @@ void create_main_menu() {
   lv_obj_set_style_text_font(title, &my_font_28, LV_PART_MAIN);
   lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 10);
 
-  const char* menu_buttons[] = {
-    "Condition Test",
-    "Log Catch",
-    "Map",
-    "Settings",
-    "About"
-       
-  };
-
+  const char* menu_buttons[] = { "Condition Test", "Log Catch", "Map", "Settings", "About", "View Entries" };
   lv_obj_t* prev_btn = nullptr;
-  int start_y = 60;   // vertical offset from top
-  int spacing = 20;   // space between buttons
+  int start_y = 60;
+  int spacing = 20;
 
-  for (int i = 0; i < 5; i++) {
-      lv_obj_t* btn = lv_button_create(screen);
-      lv_obj_set_size(btn, 200, 40);  // uniform size
+  for (int i = 0; i < 6; i++) {
+    lv_obj_t* btn = lv_button_create(screen);
+    lv_obj_set_size(btn, 200, 40);
 
-      if (!prev_btn)
-          lv_obj_align(btn, LV_ALIGN_TOP_MID, 0, start_y); // first button
-      else
-          lv_obj_align_to(btn, prev_btn, LV_ALIGN_OUT_BOTTOM_MID, 0, spacing); // below previous, centered
+    if (!prev_btn)
+      lv_obj_align(btn, LV_ALIGN_TOP_MID, 0, start_y);
+    else
+      lv_obj_align_to(btn, prev_btn, LV_ALIGN_OUT_BOTTOM_MID, 0, spacing);
 
-      lv_obj_set_style_bg_color(btn, lv_color_hex(0x00FF00), LV_PART_MAIN);
-      lv_obj_set_style_bg_opa(btn, LV_OPA_COVER, LV_PART_MAIN);
-      lv_obj_set_style_border_width(btn, 2, LV_PART_MAIN);
-      lv_obj_set_style_border_color(btn, lv_color_hex(0x00AA00), LV_PART_MAIN);
+    lv_obj_set_style_bg_color(btn, lv_color_hex(0x00FF00), LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(btn, LV_OPA_COVER, LV_PART_MAIN);
+    lv_obj_set_style_border_width(btn, 2, LV_PART_MAIN);
+    lv_obj_set_style_border_color(btn, lv_color_hex(0x00AA00), LV_PART_MAIN);
 
-      lv_obj_t* label = lv_label_create(btn);
-      lv_label_set_text(label, menu_buttons[i]);
-      lv_obj_center(label);
-      lv_obj_set_style_text_color(label, lv_color_hex(0x000000), LV_PART_MAIN);
+    lv_obj_t* label = lv_label_create(btn);
+    lv_label_set_text(label, menu_buttons[i]);
+    lv_obj_center(label);
+    lv_obj_set_style_text_color(label, lv_color_hex(0x000000), LV_PART_MAIN);
 
-      lv_obj_add_event_cb(btn, on_menu_button, LV_EVENT_CLICKED, NULL);
-
-      prev_btn = btn;
+    lv_obj_add_event_cb(btn, on_menu_button, LV_EVENT_CLICKED, NULL);
+    prev_btn = btn;
   }
 
   lv_screen_load(screen);
