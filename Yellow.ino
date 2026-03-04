@@ -1,3 +1,4 @@
+#include "User_Setup_JC2432W328C.h"
 #include <LovyanGFX.hpp>
 #include "CST820.h"
 #include <lvgl.h>
@@ -5,6 +6,12 @@
 #include "FS.h"
 #include "SD.h"
 #include "SPI.h"
+
+bool log_request = false;
+
+String pending_species;
+String pending_size;
+String pending_weight;
 
 // ===== Display Setup =====
 class LGFX_JustDisplay : public lgfx::LGFX_Device {
@@ -30,7 +37,7 @@ public:
     }
 
     { auto cfg = _panel.config();
-      cfg.pin_cs           = 15;
+      cfg.pin_cs           = 15; // Display CS
       cfg.pin_rst          = -1;
       cfg.pin_busy         = -1;
       cfg.panel_width      = 240;
@@ -44,10 +51,14 @@ public:
 
     setPanel(&_panel);
   }
+  
 };
 
 LGFX_JustDisplay tft;
 CST820 touch(33, 32, 25, 21);
+
+// ===== LVGL display handle =====
+lv_display_t* disp;
 
 #define LVGL_TICK_PERIOD 5
 
@@ -90,7 +101,7 @@ void back_to_menu(lv_event_t* e) {
 lv_obj_t* add_back_button(lv_obj_t* parent) {
   lv_obj_t* btn = lv_button_create(parent);
   lv_obj_set_size(btn, 100, 35);
-  lv_obj_align(btn, LV_ALIGN_BOTTOM_LEFT, 10, -10); // bottom-left corner
+  lv_obj_align(btn, LV_ALIGN_BOTTOM_LEFT, 10, -10);
 
   lv_obj_set_style_bg_color(btn, lv_color_hex(0x00FF00), LV_PART_MAIN);
   lv_obj_set_style_bg_opa(btn, LV_OPA_COVER, LV_PART_MAIN);
@@ -106,22 +117,53 @@ lv_obj_t* add_back_button(lv_obj_t* parent) {
   return btn;
 }
 
-// ===== SD Logging =====
-void log_catch(String species, String size, String weight) {
-  if (!SD.begin()) { Serial.println("❌ SD mount failed"); return; }
-  File file = SD.open("/catch_log.csv", FILE_APPEND);
-  if (!file) { Serial.println("❌ Cannot open file"); return; }
+// ===== SD Mount Flag =====
+bool sd_mounted = false;
+
+// ===== SD Logging (safe SPI switching) =====
+void log_catch_safe(String species, String size, String weight) {
+  if (!sd_mounted) { 
+    Serial.println("❌ SD not mounted"); 
+    return; 
+  }
+
+  // Reinit SPI for SD (14MHz)
+  SPI.begin(18, 19, 23, 5);
+  if (!SD.begin(5, SPI, 14000000)) {
+    Serial.println("❌ SD.begin failed");
+    return;
+  }
+
+  // Open file for write (append)
+  File file = SD.open("/catch_log.csv", FILE_WRITE);
+  if (!file) {
+    Serial.println("❌ Cannot open file");
+    return;
+  }
+
+  // Write entry
   String entry = species + "," + size + "," + weight + "," + String(millis()) + "\n";
   file.print(entry);
   file.close();
+
   Serial.println("✅ Catch logged");
+
+  // Restore screen SPI
+  tft.init();
+  tft.setRotation(1);
 }
 
-// ===== Delete Entry =====
+// ===== Delete Entry (with SD reinit) =====
 void delete_entry(const String& line) {
-  if (!SD.begin()) return;
+  if (!sd_mounted) return;
+
+  SPI.begin(18, 19, 23, 5);
+  if (!SD.begin(5, SPI, 14000000)) {
+    Serial.println("❌ SD.begin failed for delete");
+    return;
+  }
+
   File file = SD.open("/catch_log.csv");
-  if (!file) return;
 
   File temp = SD.open("/temp.csv", FILE_WRITE);
   String l;
@@ -129,23 +171,29 @@ void delete_entry(const String& line) {
     l = file.readStringUntil('\n');
     if (l != line) temp.println(l);
   }
+
   file.close();
   temp.close();
+
   SD.remove("/catch_log.csv");
   SD.rename("/temp.csv", "/catch_log.csv");
+
+  // Restore screen
+  tft.init();
+  tft.setRotation(1);
 }
 
 // ===== Log Catch Screen =====
 lv_obj_t *species_input, *size_input, *weight_input;
+lv_obj_t* log_cont;
 
 struct kb_userdata_t {
     lv_obj_t* kb;
     lv_obj_t* submit_btn;
-    lv_obj_t* view_btn; // nullptr for log screen
+    lv_obj_t* view_btn;
     lv_obj_t* back_btn;
 };
 
-// Called when a textarea is focused
 void textarea_focused_cb(lv_event_t* e) {
     lv_obj_t* ta = (lv_obj_t*)lv_event_get_target(e);
     kb_userdata_t* ud = (kb_userdata_t*)lv_event_get_user_data(e);
@@ -158,10 +206,17 @@ void textarea_focused_cb(lv_event_t* e) {
     if(ud->view_btn) lv_obj_add_flag(ud->view_btn, LV_OBJ_FLAG_HIDDEN);
     if(ud->back_btn) lv_obj_add_flag(ud->back_btn, LV_OBJ_FLAG_HIDDEN);
 
-    lv_obj_scroll_to_view(ta, LV_ANIM_ON);
+    lv_coord_t kb_h = lv_obj_get_height(ud->kb);
+    lv_coord_t ta_y = lv_obj_get_y(ta);
+    lv_coord_t cont_y = lv_obj_get_y(log_cont);
+
+    if(ta_y + kb_h > 240) {
+        lv_obj_set_y(log_cont, cont_y - (ta_y + kb_h - 240 + 10));
+    }
+
+    lv_obj_scroll_to_view_recursive(ta, LV_ANIM_ON);
 }
 
-// Called when keyboard is closed (READY or CANCEL)
 void kb_event_cb(lv_event_t* e) {
     lv_obj_t* kb = (lv_obj_t*)lv_event_get_target(e);
     kb_userdata_t* ud = (kb_userdata_t*)lv_event_get_user_data(e);
@@ -171,6 +226,8 @@ void kb_event_cb(lv_event_t* e) {
     if(ud->submit_btn) lv_obj_clear_flag(ud->submit_btn, LV_OBJ_FLAG_HIDDEN);
     if(ud->view_btn) lv_obj_clear_flag(ud->view_btn, LV_OBJ_FLAG_HIDDEN);
     if(ud->back_btn) lv_obj_clear_flag(ud->back_btn, LV_OBJ_FLAG_HIDDEN);
+
+    lv_obj_set_y(log_cont, 30);
 }
 
 void create_log_screen() {
@@ -181,50 +238,46 @@ void create_log_screen() {
   lv_label_set_text(title_label, "Log Catch");
   lv_obj_align(title_label, LV_ALIGN_TOP_MID, 0, 10);
 
-  // Scrollable container
-  lv_obj_t* cont = lv_obj_create(screen);
-  lv_obj_set_size(cont, 320, 240 - 50);  // leave space for title
-  lv_obj_align(cont, LV_ALIGN_TOP_MID, 0, 30);
-  lv_obj_set_scroll_dir(cont, LV_DIR_VER);
-  lv_obj_set_scrollbar_mode(cont, LV_SCROLLBAR_MODE_AUTO);
-  lv_obj_set_style_bg_color(cont, lv_color_hex(0x111111), LV_PART_MAIN);
-  lv_obj_set_style_border_width(cont, 0, LV_PART_MAIN);
+  log_cont = lv_obj_create(screen);
+  lv_obj_set_size(log_cont, 320, 240 - 50);
+  lv_obj_align(log_cont, LV_ALIGN_TOP_MID, 0, 30);
+  lv_obj_set_scroll_dir(log_cont, LV_DIR_VER);
+  lv_obj_set_scrollbar_mode(log_cont, LV_SCROLLBAR_MODE_AUTO);
+  lv_obj_set_style_bg_color(log_cont, lv_color_hex(0x111111), LV_PART_MAIN);
+  lv_obj_set_style_border_width(log_cont, 0, LV_PART_MAIN);
 
-  // Labels and larger inputs
-  species_input = lv_textarea_create(cont);
+  species_input = lv_textarea_create(log_cont);
   lv_textarea_set_placeholder_text(species_input, "Species");
-  lv_obj_set_size(species_input, 200, 40);  // bigger
+  lv_obj_set_size(species_input, 200, 40);
   lv_obj_align(species_input, LV_ALIGN_TOP_LEFT, 10, 10);
 
-  lv_obj_t* species_label = lv_label_create(cont);
+  lv_obj_t* species_label = lv_label_create(log_cont);
   lv_label_set_text(species_label, "Species:");
   lv_obj_align_to(species_label, species_input, LV_ALIGN_OUT_LEFT_MID, -70, 0);
 
-  size_input = lv_textarea_create(cont);
+  size_input = lv_textarea_create(log_cont);
   lv_textarea_set_placeholder_text(size_input, "cm");
   lv_obj_set_size(size_input, 200, 40);
   lv_obj_align(size_input, LV_ALIGN_TOP_LEFT, 10, 60);
 
-  lv_obj_t* size_label = lv_label_create(cont);
+  lv_obj_t* size_label = lv_label_create(log_cont);
   lv_label_set_text(size_label, "Size:");
   lv_obj_align_to(size_label, size_input, LV_ALIGN_OUT_LEFT_MID, -70, 0);
 
-  weight_input = lv_textarea_create(cont);
+  weight_input = lv_textarea_create(log_cont);
   lv_textarea_set_placeholder_text(weight_input, "kg");
   lv_obj_set_size(weight_input, 200, 40);
   lv_obj_align(weight_input, LV_ALIGN_TOP_LEFT, 10, 110);
 
-  lv_obj_t* weight_label = lv_label_create(cont);
+  lv_obj_t* weight_label = lv_label_create(log_cont);
   lv_label_set_text(weight_label, "Weight:");
   lv_obj_align_to(weight_label, weight_input, LV_ALIGN_OUT_LEFT_MID, -70, 0);
 
-  // Keyboard (hidden by default)
   lv_obj_t* kb = lv_keyboard_create(screen);
   lv_obj_set_size(kb, 320, 120);
   lv_obj_align(kb, LV_ALIGN_BOTTOM_MID, 0, 0);
   lv_obj_add_flag(kb, LV_OBJ_FLAG_HIDDEN);
 
-  // Submit button bottom-right
   lv_obj_t* submit_btn = lv_button_create(screen);
   lv_obj_set_size(submit_btn, 100, 35);
   lv_obj_align(submit_btn, LV_ALIGN_BOTTOM_RIGHT, -10, -10);
@@ -237,9 +290,11 @@ void create_log_screen() {
   lv_obj_center(submit_label);
 
   lv_obj_add_event_cb(submit_btn, [](lv_event_t* e){
-    log_catch(lv_textarea_get_text(species_input),
-              lv_textarea_get_text(size_input),
-              lv_textarea_get_text(weight_input));
+    pending_species = String(lv_textarea_get_text(species_input));
+    pending_size    = String(lv_textarea_get_text(size_input));
+    pending_weight  = String(lv_textarea_get_text(weight_input));
+
+    log_request = true;
     lv_textarea_set_text(species_input, "");
     lv_textarea_set_text(size_input, "");
     lv_textarea_set_text(weight_input, "");
@@ -247,28 +302,13 @@ void create_log_screen() {
 
   lv_obj_t* back_btn = add_back_button(screen);
 
-  // Keyboard userdata on heap
   kb_userdata_t* kb_data = new kb_userdata_t{ kb, submit_btn, nullptr, back_btn };
   lv_obj_add_event_cb(kb, kb_event_cb, LV_EVENT_READY, kb_data);
   lv_obj_add_event_cb(kb, kb_event_cb, LV_EVENT_CANCEL, kb_data);
 
-  // Attach keyboard and scroll container to textareas
-  auto textarea_cb = [](lv_event_t* e){
-    lv_obj_t* ta = (lv_obj_t*)lv_event_get_target(e);
-    kb_userdata_t* ud = (kb_userdata_t*)lv_event_get_user_data(e);
-    lv_keyboard_set_textarea(ud->kb, ta);
-    lv_obj_clear_flag(ud->kb, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_move_foreground(ud->kb);
-    if(ud->submit_btn) lv_obj_add_flag(ud->submit_btn, LV_OBJ_FLAG_HIDDEN);
-    if(ud->back_btn) lv_obj_add_flag(ud->back_btn, LV_OBJ_FLAG_HIDDEN);
-
-    // Scroll textarea into view
-    lv_obj_scroll_to_view_recursive(ta, LV_ANIM_ON);
-  };
-
-  lv_obj_add_event_cb(species_input, textarea_cb, LV_EVENT_FOCUSED, kb_data);
-  lv_obj_add_event_cb(size_input, textarea_cb, LV_EVENT_FOCUSED, kb_data);
-  lv_obj_add_event_cb(weight_input, textarea_cb, LV_EVENT_FOCUSED, kb_data);
+  lv_obj_add_event_cb(species_input, textarea_focused_cb, LV_EVENT_FOCUSED, kb_data);
+  lv_obj_add_event_cb(size_input, textarea_focused_cb, LV_EVENT_FOCUSED, kb_data);
+  lv_obj_add_event_cb(weight_input, textarea_focused_cb, LV_EVENT_FOCUSED, kb_data);
 
   lv_screen_load(screen);
 }
@@ -290,7 +330,7 @@ void create_view_entries_screen() {
   lv_obj_set_style_bg_color(cont, lv_color_hex(0x111111), LV_PART_MAIN);
   lv_obj_set_style_border_width(cont, 0, LV_PART_MAIN);
 
-  if (!SD.begin()) {
+  if (!sd_mounted) {
     lv_label_set_text(lv_label_create(screen), "SD card error");
     lv_screen_load(screen);
     return;
@@ -337,45 +377,10 @@ void create_view_entries_screen() {
 }
 
 // ===== Other Screens =====
-void create_condition_screen() {
-  lv_obj_t* screen = lv_obj_create(NULL);
-  lv_obj_set_style_bg_color(screen, lv_color_hex(0x111111), LV_PART_MAIN);
-  lv_obj_t* label = lv_label_create(screen);
-  lv_label_set_text(label, "Condition Test Screen");
-  lv_obj_align(label, LV_ALIGN_TOP_MID, 0, 20);
-  add_back_button(screen);
-  lv_screen_load(screen);
-}
-
-void create_settings_screen() {
-  lv_obj_t* screen = lv_obj_create(NULL);
-  lv_obj_set_style_bg_color(screen, lv_color_hex(0x111111), LV_PART_MAIN);
-  lv_obj_t* label = lv_label_create(screen);
-  lv_label_set_text(label, "Settings Screen");
-  lv_obj_align(label, LV_ALIGN_TOP_MID, 0, 20);
-  add_back_button(screen);
-  lv_screen_load(screen);
-}
-
-void create_about_screen() {
-  lv_obj_t* screen = lv_obj_create(NULL);
-  lv_obj_set_style_bg_color(screen, lv_color_hex(0x111111), LV_PART_MAIN);
-  lv_obj_t* label = lv_label_create(screen);
-  lv_label_set_text(label, "About Screen");
-  lv_obj_align(label, LV_ALIGN_TOP_MID, 0, 20);
-  add_back_button(screen);
-  lv_screen_load(screen);
-}
-
-void create_map_screen() {
-  lv_obj_t* screen = lv_obj_create(NULL);
-  lv_obj_set_style_bg_color(screen, lv_color_hex(0x111111), LV_PART_MAIN);
-  lv_obj_t* label = lv_label_create(screen);
-  lv_label_set_text(label, "Map Screen");
-  lv_obj_align(label, LV_ALIGN_TOP_MID, 0, 20);
-  add_back_button(screen);
-  lv_screen_load(screen);
-}
+void create_condition_screen() { lv_obj_t* screen = lv_obj_create(NULL); lv_obj_set_style_bg_color(screen, lv_color_hex(0x111111), LV_PART_MAIN); lv_obj_t* label = lv_label_create(screen); lv_label_set_text(label, "Condition Test Screen"); lv_obj_align(label, LV_ALIGN_TOP_MID, 0, 20); add_back_button(screen); lv_screen_load(screen); }
+void create_settings_screen() { lv_obj_t* screen = lv_obj_create(NULL); lv_obj_set_style_bg_color(screen, lv_color_hex(0x111111), LV_PART_MAIN); lv_obj_t* label = lv_label_create(screen); lv_label_set_text(label, "Settings Screen"); lv_obj_align(label, LV_ALIGN_TOP_MID, 0, 20); add_back_button(screen); lv_screen_load(screen); }
+void create_about_screen() { lv_obj_t* screen = lv_obj_create(NULL); lv_obj_set_style_bg_color(screen, lv_color_hex(0x111111), LV_PART_MAIN); lv_obj_t* label = lv_label_create(screen); lv_label_set_text(label, "About Screen"); lv_obj_align(label, LV_ALIGN_TOP_MID, 0, 20); add_back_button(screen); lv_screen_load(screen); }
+void create_map_screen() { lv_obj_t* screen = lv_obj_create(NULL); lv_obj_set_style_bg_color(screen, lv_color_hex(0x111111), LV_PART_MAIN); lv_obj_t* label = lv_label_create(screen); lv_label_set_text(label, "Map Screen"); lv_obj_align(label, LV_ALIGN_TOP_MID, 0, 20); add_back_button(screen); lv_screen_load(screen); }
 
 // ===== Menu Button Callback =====
 void on_menu_button(lv_event_t* e) {
@@ -438,6 +443,15 @@ void setup() {
   Serial.begin(115200);
   delay(1500);
 
+  // Mount SD card with explicit CS pin
+  SPI.begin(18, 19, 23, 5);
+  if (!SD.begin(5, SPI, 14000000)) {
+      Serial.println("❌ SD mount failed");
+  } else {
+      Serial.println("✅ SD mounted successfully");
+      sd_mounted = true;
+  }
+
   pinMode(27, OUTPUT);
   analogWrite(27, 255);
 
@@ -448,7 +462,7 @@ void setup() {
   lv_init();
 
   static lv_color_t buf1[240 * 60];
-  static lv_display_t* disp = lv_display_create(320, 240);
+  disp = lv_display_create(320, 240);
   lv_display_set_flush_cb(disp, lv_flush_cb);
   lv_display_set_buffers(disp, buf1, NULL, sizeof(buf1), LV_DISPLAY_RENDER_MODE_PARTIAL);
 
@@ -463,5 +477,11 @@ void setup() {
 void loop() {
   lv_tick_inc(LVGL_TICK_PERIOD);
   lv_timer_handler();
+
+  if (log_request) {
+    log_request = false;
+    log_catch_safe(pending_species, pending_size, pending_weight);
+  }
+
   delay(1);
 }
