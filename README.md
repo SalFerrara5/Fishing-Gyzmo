@@ -1,202 +1,181 @@
-# 🎣 Fishing Gyzmo
+# Fishing Gyzmo 🎣
 
-Fishing Gyzmo is a touchscreen-based fishing companion built on an ESP32 using LVGL and a 2" ST7789 display. It provides a clean, responsive interface for logging catches, testing conditions, and managing fishing data in a standalone device.
+## Overview
 
-The goal is simple: a dedicated tool that boots instantly and feels like real hardware, not a phone app.
+Fishing Gyzmo is a handheld embedded system built on an ESP32 platform designed to assist anglers in the field. It combines a touchscreen interface, GPS tracking, and onboard data logging to create a simple, reliable tool for recording catches and viewing real-time location data.
 
----
-
-## 📦 Features
-
-* Dark themed LVGL v9 interface
-* Custom title font support
-* Touchscreen button menu
-* Adjustable display backlight
-* Modular screen system
-* Serial debugging output
-* Designed for future expansion (WiFi, logging, sensors)
-
-Planned modules:
-
-* Condition Test
-* Log Catch
-* Settings
-* Catch History
-* Weather integration
+This project focuses on keeping things practical: quick inputs, clear data, and hardware that works outdoors without needing a phone or internet connection.
 
 ---
 
-## 🛠 Hardware
+## Features
 
-* ESP32 (VSPI used)
-* 240x320 ST7789 display
-* CST820 capacitive touch controller
-* PWM-controlled backlight
+### 📍 GPS Tracking
 
-### Pin Configuration (Current Build)
+* Real-time latitude and longitude display
+* Altitude (converted to feet)
+* Speed (mph) and heading (degrees)
+* Satellite count and signal accuracy (HDOP)
+* Date and local time (EST offset applied)
 
-**Display**
+### 📝 Catch Logging
 
-* SCLK → GPIO 14
-* MOSI → GPIO 13
-* DC → GPIO 2
-* CS → GPIO 15
-* Backlight → GPIO 27
+* Log fish species, size, and weight
+* Entries stored locally on SD card (`/catch_log.csv`)
+* Timestamped using system uptime
+* Designed for quick entry in the field
 
-**Touch**
+### 📂 Log Management
 
-* SDA → GPIO 33
-* SCL → GPIO 32
-* RST → GPIO 25
-* INT → GPIO 21
+* View all logged catches directly on the device
+* Delete individual entries
+* Scrollable interface for large logs
 
-If your wiring differs, update the SPI configuration and CST820 constructor in the sketch.
+### 🖥️ Touchscreen UI
+
+* Built with LVGL for responsive graphics
+* On-screen keyboard for data entry
+* Clean menu navigation system
+* Multiple screens:
+
+  * Main Menu
+  * Log Catch
+  * View Entries
+  * GPS Info
+  * Map (placeholder)
+  * Settings (placeholder)
+  * About (placeholder)
+  * Condition Test
 
 ---
 
-## 🧰 Software Stack
+## Hardware
 
-* LVGL v9
-* LovyanGFX
-* CST820 driver
-* Arduino framework
-
-Important: Custom fonts must be generated for LVGL v9. Fonts generated for earlier versions will not compile without modification.
+* ESP32-based board (JC2432W328C configuration)
+* 320x240 ST7789 display (SPI)
+* CST820 capacitive touchscreen
+* NEO-6M GPS module (UART)
+* SD card module (SPI)
+* Backlight control via PWM (GPIO 27)
 
 ---
 
-## 🖥 UI Structure
+## Software & Libraries
 
-The interface is built using LVGL objects:
+* LVGL (GUI framework)
+* LovyanGFX (display driver)
+* TinyGPS++ (GPS parsing)
+* SD / SPI / FS (file system handling)
 
-* Root screen object
-* Title label
-* Vertically stacked buttons
-* Event callbacks for interaction
+---
 
-To add a new button:
+## How It Works
 
-```cpp
-lv_obj_t* btn = lv_button_create(lv_screen_active());
-lv_obj_align(btn, LV_ALIGN_TOP_LEFT, 10, 80);
-lv_obj_add_event_cb(btn, my_callback, LV_EVENT_CLICKED, NULL);
+### System Flow
 
-lv_obj_t* label = lv_label_create(btn);
-lv_label_set_text(label, "New Button");
-lv_obj_center(label);
+1. Device boots and initializes:
+
+   * Display
+   * Touch input
+   * SD card
+   * GPS serial stream
+
+2. Main menu is displayed
+
+3. User selects an action:
+
+   * Log a catch → data stored to SD card
+   * View entries → reads from CSV file
+   * GPS info → live data from satellite feed
+
+4. Background processes:
+
+   * GPS continuously parsed from serial input
+   * UI updated in real time
+   * Logging handled safely with SPI reinitialization
+
+---
+
+## Data Format
+
+Catch logs are stored as CSV:
+
+```
+species,size,weight,timestamp
+```
+
+Example:
+
+```
+Bass,45,2.1,12345678
 ```
 
 ---
 
-## 🎨 Customization
+## Notable Implementation Details
 
-### Change Background Color
+* **SPI Bus Sharing**
 
-```cpp
-lv_obj_set_style_bg_color(lv_screen_active(),
-                          lv_color_hex(0x222222),
-                          LV_PART_MAIN);
-```
+  * Display and SD card share SPI
+  * System safely reinitializes SPI before SD operations
+  * Prevents common ESP32 display corruption issues
 
----
+* **Touch Input Mapping**
 
-### Change Button Color
+  * Coordinates rotated and flipped to match screen orientation
 
-```cpp
-lv_obj_set_style_bg_color(btn,
-                          lv_color_hex(0x00AA00),
-                          LV_PART_MAIN);
-```
+* **Keyboard Handling**
 
-You can also style pressed state:
+  * UI dynamically shifts when keyboard appears
+  * Prevents input fields from being hidden
 
-```cpp
-lv_obj_set_style_bg_color(btn,
-                          lv_color_hex(0x007700),
-                          LV_PART_MAIN | LV_STATE_PRESSED);
-```
+* **GPS Handling**
+
+  * Detects incoming NMEA stream automatically
+  * Announces when satellite fix is acquired
+  * Converts UTC → EST manually
 
 ---
 
-### Using Custom Fonts
+## Current Limitations
 
-1. Generate a font using the LVGL font converter
-2. Ensure a **space character is included** if limiting symbols
-3. Place the generated `.h` file in the sketch folder
-4. Include it:
-
-```cpp
-#include "my_font_28.h"
-```
-
-5. Apply it to a label:
-
-```cpp
-lv_obj_set_style_text_font(title, &my_font_28, LV_PART_MAIN);
-```
-
-If compilation fails, remove `.static_bitmap` from the font struct and ensure the struct matches LVGL v9 format.
+* Map screen is a placeholder (no rendering yet)
+* Settings and About screens not implemented
+* No persistent timestamp (uses millis instead of RTC/GPS time)
+* Timezone is hardcoded (EST only, no DST handling)
+* No filtering or sorting of log entries
 
 ---
 
-## ⚡ Performance Tips
+## Future Improvements
 
-If the UI feels slow:
-
-* Increase SPI write frequency in LovyanGFX config
-* Increase LVGL buffer size:
-
-```cpp
-static lv_color_t buf1[240 * 20];
-```
-
-* Reduce unnecessary Serial printing
-* Avoid heavy logic inside event callbacks
+* Add offline map tiles and GPS plotting
+* Replace millis timestamp with GPS-based time
+* Implement waypoint saving
+* Add weather/environment data integration
+* Improve UI styling and responsiveness
+* Export logs via USB or wireless
+* Add species presets to speed up logging
 
 ---
 
-## 🔧 Screen Navigation Structure
+## Getting Started
 
-Each feature should live in its own function:
-
-```cpp
-void create_main_menu();
-void create_log_screen();
-void create_settings_screen();
-```
-
-To switch screens:
-
-```cpp
-lv_obj_clean(lv_screen_active());
-create_log_screen();
-```
-
-This keeps the code modular and easier to expand.
+1. Flash code to ESP32
+2. Insert formatted SD card
+3. Connect GPS module to UART (default baud: 9600)
+4. Power on device
+5. Wait for GPS signal lock
+6. Start logging catches
 
 ---
 
-## 🚀 Future Expansion Ideas
+## Philosophy
 
-* EEPROM / Preferences storage
-* SD card logging
-* GPS integration
-* Barometric pressure sensor
-* Moon phase calculations
-* WiFi time sync
-* USB data export
+This project sticks to a simple idea: tools in the field should just work. No subscriptions, no signal required, no nonsense. Turn it on, catch fish, log it, move on.
 
 ---
 
-## 📜 Project Philosophy
+## Author Notes
 
-Fishing Gyzmo is meant to be:
-
-* Fast
-* Simple
-* Readable outdoors
-* Purpose-built
-
-No clutter. No unnecessary animations. Just a clean interface that works every time.
-
----
+Built as part of an embedded systems project with a focus on real-world usability. The goal isn’t to overcomplicate things, it’s to make something you’d actually bring fishing without thinking twice.
