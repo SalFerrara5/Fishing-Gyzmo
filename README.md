@@ -328,4 +328,3 @@ Helpful messages include:
 
 This is the kind of tool you toss in your tackle box and forget about until you need it. It’s not trying to compete with your phone. It’s trying to replace the stuff your phone does poorly when you’re actually out fishing.
 
-And honestly, that’s where it shines.
