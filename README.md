@@ -1,330 +1,201 @@
-# Fishing Gyzmo 🎣
-
-## Overview
-
-Fishing Gyzmo is a purpose-built handheld fishing assistant running on an ESP32. It combines GPS tracking, touchscreen input, and local data logging into a self-contained device that works anywhere, no signal required.
-
-The design leans toward reliability over flash. Everything runs locally, boots fast, and does exactly what you need on the water without distractions.
-
----
-
-## Core Capabilities
-
-### 📍 GPS System
-
-The device uses a NEO-6M GPS module with continuous NMEA parsing via UART.
-
-**Live Data Displayed:**
-
-* Latitude / Longitude (6 decimal precision)
-* Altitude (converted from meters → feet)
-* Speed (mph)
-* Heading (degrees)
-* Satellite count
-* HDOP (accuracy indicator)
-* Date (GPS-derived)
-* Time (converted from UTC → EST manually)
-
-**Behavior Notes:**
-
-* Automatically detects incoming GPS stream
-* Announces when a valid satellite fix is acquired
-* Continuously updates UI when new data arrives
-* Handles time conversion locally (no RTC dependency)
-
----
-
-### 📝 Catch Logging System
-
-The logging system is built around simplicity and durability.
-
-**Inputs:**
-
-* Species (text)
-* Size (cm)
-* Weight (kg)
-
-**Storage:**
-
-* File: `/catch_log.csv`
-* Format: comma-separated values
-* Each entry appended safely
-
-**Write Flow:**
-
-1. User enters data via touchscreen keyboard
-2. Data stored temporarily in memory
-3. `log_request` flag triggers write in main loop
-4. SPI bus switches from display → SD card
-5. Data appended to file
-6. SPI restored to display
-
-This avoids crashes and display corruption, which is a classic ESP32 problem when sharing SPI.
-
----
-
-### 📂 Log Viewer & Management
-
-Users can browse all saved entries directly on the device.
-
-**Features:**
-
-* Scrollable list of entries
-* Each entry displayed as raw CSV line
-* Individual delete button per entry
-
-**Delete Process:**
-
-* Reads original file
-* Writes all non-matching entries to temp file
-* Replaces original file
-* Reinitializes display afterward
-
-Not fancy, but solid and predictable.
-
----
-
-### 🖥️ User Interface (LVGL)
-
-The UI is built using LVGL with a custom layout for a 320x240 display.
-
-**Design Goals:**
-
-* High contrast (dark background, bright green accents)
-* Large touch targets
-* Minimal layers or clutter
-* Fast transitions between screens
-
-**Main Menu Options:**
-
-* Condition Test
-* Log Catch
-* Map (placeholder)
-* GPS Info
-* Settings (placeholder)
-* About (placeholder)
-* View Entries
-
----
-
-### ⌨️ On-Screen Keyboard System
-
-The keyboard is dynamically shown when a text field is selected.
-
-**Key Behaviors:**
-
-* Automatically attaches to active textarea
-* Hides other buttons while active
-* Shifts container upward to prevent overlap
-* Restores layout when dismissed
-
-This avoids the classic “keyboard covers input field” issue.
-
----
-
-## Hardware Architecture
-
-### Microcontroller
-
-* ESP32 (dual-core)
-* Handles UI, GPS parsing, SD logging, and touch input
-
-### Display
-
-* ST7789 (320x240)
-* Driven via SPI using LovyanGFX
-* Optimized for high refresh rates (80 MHz write)
-
-### Touch Controller
-
-* CST820 capacitive touch
-* Custom coordinate remapping:
-
-  * X/Y flipped
-  * Adjusted for rotation
-
-### GPS Module
-
-* NEO-6M
-* Connected via hardware serial (9600 baud default)
-
-### Storage
-
-* MicroSD card via SPI
-* Dedicated chip select (GPIO 5)
-
-### Power + Backlight
-
-* Backlight controlled via PWM (GPIO 27)
-* Set to full brightness on boot
-
----
-
-## Pin Configuration (Key Lines)
-
-| Function      | GPIO     |
-| ------------- | -------- |
-| TFT SCLK      | 14       |
-| TFT MOSI      | 13       |
-| TFT DC        | 2        |
-| TFT CS        | 15       |
-| SD CS         | 5        |
-| SD SPI        | 18/19/23 |
-| Touch INT/RST | 33/32    |
-| Backlight     | 27       |
-
----
-
-## Software Architecture
-
-### Main Loop Responsibilities
-
-The loop is intentionally simple and predictable:
-
-1. Update LVGL tick and UI handler
-2. Process pending log requests
-3. Read GPS serial data continuously
-4. Update GPS display if new data available
-5. Announce GPS fix once
-6. Small delay for stability
-
----
-
-### Display Pipeline
-
-* LVGL renders into buffer
-* `lv_flush_cb` pushes pixels via LovyanGFX
-* Partial rendering used to reduce memory usage
-
----
-
-### Touch Input Handling
-
-* Polls CST820 controller
-* Converts raw coordinates to screen space
-* Feeds into LVGL input system
-
----
-
-### SD Card Handling Strategy
-
-SPI is shared between:
-
-* Display
-* SD card
-
-To prevent conflicts:
-
-* SPI is reinitialized before every SD operation
-* Display is reinitialized after
-
-This is not elegant, but it’s reliable. On ESP32, that matters more.
-
----
-
-## File Structure
-
-```
-/catch_log.csv
-/temp.csv (used during delete operations)
-```
-
----
-
-## Data Format
-
-```csv
+Fishing-Gyzmo
+Overview
+
+Fishing-Gyzmo is a standalone, ESP32-based touchscreen fishing assistant designed to log catches and provide real-time GPS data without relying on a phone or external apps.
+
+It combines a graphical interface, SD card storage, and GPS tracking into a compact system intended for practical, real-world use while fishing.
+
+The system is built using LVGL for the UI, TinyGPS++ for GPS parsing, and LovyanGFX for display control.
+
+Core Features
+1. Catch Logging System
+Input fields:
+Species
+Size (cm)
+Weight (kg)
+Touchscreen keyboard for data entry
+One-button submission workflow
+Logs stored in CSV format on SD card
+
+Each entry includes:
+
+Species
+Size
+Weight
+Timestamp (based on system uptime via millis())
+2. Catch Log Viewer
+Displays all saved entries from catch_log.csv
+Scrollable list interface
+Each entry includes:
+Raw CSV line
+Delete button per entry:
+Removes entry by rewriting file
+Uses temporary file swap method (temp.csv)
+3. GPS System
+Live Data Display
+Latitude / Longitude
+Altitude (converted to feet)
+Speed (mph)
+Heading (degrees)
+Satellite count
+HDOP (signal accuracy)
+Date and time
+Status Detection
+Detects:
+No serial data
+GPS data stream active
+No satellite fix
+Valid position fix
+Behavior
+Continuously reads UART buffer
+Uses non-blocking parsing
+Periodically yields to avoid watchdog resets
+4. Time System
+GPS-Based Time
+Uses UTC time from GPS module
+Timezone Handling
+Automatic mode:
+Calculates timezone using longitude (longitude / 15)
+Manual mode:
+User-adjustable offset (-12 to +14)
+DST (Daylight Saving Time)
+Optional auto DST toggle
+Approximation:
+Enabled for:
+March (after ~8th)
+April through October
+Disabled automatically in southern hemisphere
+Display
+Global time overlay (top-right corner)
+Updates every second
+Also shown in GPS screen
+5. Settings System
+Brightness Control
+Slider (10–255)
+Uses PWM output via analogWrite
+Real-time adjustment
+Time Settings
+Auto timezone toggle (GPS-based)
+Manual timezone +/- buttons
+DST toggle
+Dynamic UI Behavior
+Manual controls hidden when auto mode is enabled
+Labels update live
+6. User Interface (LVGL)
+Structure
+Full-screen UI with screen replacement system
+Each screen is dynamically created and destroyed
+Screens
+Main Menu
+Log Catch
+View Entries
+GPS Info
+Settings
+About
+Condition Test (placeholder)
+Map (placeholder)
+Navigation
+Button-based navigation
+Back button on all screens
+Smooth animated transitions
+Keyboard Handling
+On-screen keyboard appears when text fields are focused
+UI shifts to prevent overlap
+Buttons hidden while typing
+7. SD Card System
+Initialization
+Uses HSPI bus (separate from display SPI)
+Prevents bus conflicts
+File Operations
+Append logging
+Safe delete via:
+Read original file
+Write filtered data to temp file
+Replace original file
+Error Handling
+Detects:
+Mount failure
+File open failure
+Hardware Configuration
+Microcontroller
+ESP32
+Display (ST7789 SPI)
+Signal	GPIO
+SCLK	14
+MOSI	13
+CS	15
+DC	2
+Touch Controller (CST820)
+Signal	GPIO
+Touch Pins	33, 32, 25, 21
+Backlight
+Signal	GPIO
+PWM	27
+SD Card (HSPI Bus)
+Signal	GPIO
+SCK	18
+MISO	19
+MOSI	23
+CS	5
+GPS Module (NEO-6M)
+Connected to hardware Serial (UART0)
+Baud rate: 9600
+TX (GPS) → RX (ESP32)
+Software Dependencies
+LVGL
+LovyanGFX
+TinyGPS++
+Arduino SD library
+SPI library
+System Architecture
+Main Loop Responsibilities
+LVGL tick + rendering
+UART GPS data parsing
+Logging requests handling
+Time overlay updates
+UI updates based on GPS state
+Memory Management
+Screens are dynamically created and replaced
+Old screens are deleted using LVGL animation system
+Global UI pointers are cleared on screen change to prevent:
+Dangling pointers
+Memory leaks
+Random crashes
+Event-Driven Design
+UI interactions handled via LVGL callbacks
+Logging triggered via flag (log_request)
+GPS updates handled asynchronously
+Data Format
+catch_log.csv
 species,size,weight,timestamp
-```
 
 Example:
 
-```csv
-Trout,38,1.4,52344123
-Bass,45,2.1,52344987
-```
+Bass,45,2.3,12345678
+Known Limitations
+No persistent real-time clock (time resets without GPS)
+DST is approximate, not region-specific
+Map feature not implemented yet
+CSV file can grow indefinitely
+GPS shares UART with USB (debugging conflicts possible)
+Future Improvements
+Real map integration (tile-based or GPS plotting)
+Bluetooth or WiFi data export
+Better file management (size limits, pagination)
+RTC backup for timekeeping
+Weather integration
+Improved GPS fix visualization
+Usage Notes
+Always ensure SD card is inserted before boot
+GPS needs open sky for proper fix
+First GPS fix may take several minutes
+Avoid using input-only pins (GPIO 34–39) for outputs
+Summary
 
-**Note:**
+Fishing-Gyzmo is built like a proper embedded system should be:
 
-* Timestamp = `millis()` (time since boot)
-* Not absolute time (yet)
+Simple
+Reliable
+Self-contained
 
----
-
-## Known Limitations
-
-* No real map rendering yet
-* No persistent clock (relies on uptime)
-* Timezone hardcoded (EST only)
-* No daylight savings adjustment
-* CSV not parsed into structured UI (raw display only)
-* No error recovery if SD removed mid-operation
-* Memory not optimized for very large log files
-
----
-
-## Future Roadmap
-
-### High Priority
-
-* Replace millis timestamp with GPS time
-* Implement waypoint saving
-* Add basic map tile rendering (offline)
-
-### Medium Priority
-
-* Species quick-select buttons
-* Log filtering (by species/date)
-* UI polish (fonts, spacing, icons)
-
-### Long Term
-
-* Bluetooth or WiFi export
-* Weather data integration
-* Fish pattern tracking
-* Depth/temp sensor integration
-
----
-
-## Design Philosophy
-
-This project sticks to a simple rule:
-If it doesn’t help you catch fish or remember what worked, it doesn’t belong.
-
-No cloud. No accounts. No nonsense.
-
-Just:
-
-* Turn it on
-* Log your catch
-* Check your location
-* Keep moving
-
----
-
-## Build & Setup
-
-1. Flash firmware to ESP32
-2. Insert FAT32-formatted SD card
-3. Wire GPS module to UART (9600 baud)
-4. Power device
-5. Wait for GPS fix
-6. Use touchscreen to navigate
-
----
-
-## Debug Output (Serial)
-
-Helpful messages include:
-
-* SD mount success/failure
-* GPS stream detection
-* GPS fix acquisition
-* Logging success/errors
-
----
-
-## Final Notes
-
-This is the kind of tool you toss in your tackle box and forget about until you need it. It’s not trying to compete with your phone. It’s trying to replace the stuff your phone does poorly when you’re actually out fishing.
-
+No dependencies on phones or cloud services. Just power it on and it does its job.
