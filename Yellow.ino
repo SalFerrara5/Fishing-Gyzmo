@@ -7,6 +7,12 @@
 #include "SD.h"
 #include "SPI.h"
 #include <TinyGPSPlus.h>
+#include <stdlib.h>
+#include <string.h>
+
+#if defined(ARDUINO_ARCH_ESP32)
+#include <Arduino.h>
+#endif
 
 // ===== Pin Configuration (edit here first) =====
 // Display SPI pins (ST7789 over hardware SPI)
@@ -129,6 +135,7 @@ void create_map_screen();
 void create_view_entries_screen();
 void create_gps_screen();
 void create_time_overlay();
+void replace_root_screen(lv_obj_t* new_screen, bool opening_main_menu = false);
 void refresh_settings_labels();
 void apply_brightness(int value);
 int compute_timezone_offset_from_longitude(double longitude);
@@ -223,9 +230,15 @@ void delete_entry(const String& line) {
     return;
   }
   String l;
+  unsigned n = 0;
   while (file.available()) {
     l = file.readStringUntil('\n');
     if (l != line) temp.println(l);
+    if ((++n & 0x1Fu) == 0) {
+#if defined(ARDUINO_ARCH_ESP32)
+      yield();
+#endif
+    }
   }
 
   file.close();
@@ -245,6 +258,8 @@ struct kb_userdata_t {
     lv_obj_t* view_btn;
     lv_obj_t* back_btn;
 };
+
+static kb_userdata_t s_log_kb_userdata;
 
 void textarea_focused_cb(lv_event_t* e) {
     lv_obj_t* ta = (lv_obj_t*)lv_event_get_target(e);
@@ -283,6 +298,47 @@ void kb_event_cb(lv_event_t* e) {
 }
 
 lv_obj_t* gps_info_label;
+// Opening GPS Info while a fix is already valid: TinyGPS may not report isUpdated() again until the next sentence.
+static bool s_force_gps_label_paint = false;
+
+// Old screens were never deleted — each navigation leaked the whole LVGL tree until heap exhaustion / random freeze.
+// Clear globals that pointed at widgets on the outgoing screen so loop() never touches freed objects.
+// (Must live after all of these globals are declared — Arduino compiles top-to-bottom.)
+static void clear_ui_refs_on_screen_change() {
+  gps_info_label = nullptr;
+  settings_brightness_value_label = nullptr;
+  settings_timezone_value_label = nullptr;
+  settings_timezone_mode_label = nullptr;
+  settings_tz_minus_btn = nullptr;
+  settings_tz_plus_btn = nullptr;
+  species_input = nullptr;
+  size_input = nullptr;
+  weight_input = nullptr;
+  log_cont = nullptr;
+}
+
+static constexpr uint32_t UI_SCREEN_ANIM_MS = 260;
+
+void replace_root_screen(lv_obj_t* new_screen, bool opening_main_menu) {
+  lv_obj_t* old_scr = lv_screen_active();
+  // Do NOT clear_ui_refs here — create_*() already set pointers to widgets on new_screen;
+  // clearing after that left gps_info_label (and others) nullptr forever. Clear at the *start*
+  // of each full-screen builder instead.
+
+  if (old_scr == nullptr || old_scr == new_screen) {
+    lv_screen_load(new_screen);
+    return;
+  }
+
+  // Animated transition; auto_del deletes old_scr when the animation finishes (no double-delete).
+  lv_screen_load_anim_t anim = opening_main_menu ? LV_SCREEN_LOAD_ANIM_MOVE_RIGHT
+                                                 : LV_SCREEN_LOAD_ANIM_MOVE_LEFT;
+  lv_screen_load_anim(new_screen, anim, UI_SCREEN_ANIM_MS, 0, true);
+}
+
+static void menu_btn_fade_anim_cb(void* var, int32_t v) {
+  lv_obj_set_style_opa((lv_obj_t*)var, (lv_opa_t)v, LV_PART_MAIN);
+}
 
 void apply_brightness(int value) {
   brightness_level = constrain(value, 0, 255);
@@ -354,6 +410,7 @@ void refresh_settings_labels() {
 }
 
 void create_gps_screen() {
+  clear_ui_refs_on_screen_change();
 
   lv_obj_t* screen = lv_obj_create(NULL);
   lv_obj_set_style_bg_color(screen, lv_color_hex(0x111111), LV_PART_MAIN);
@@ -370,10 +427,109 @@ void create_gps_screen() {
 
   add_back_button(screen);
 
-  lv_screen_load(screen);
+  s_force_gps_label_paint = true;
+  replace_root_screen(screen);
+}
+
+static void paint_gps_summary_label() {
+  if (gps_info_label == nullptr || !gps.location.isValid()) return;
+
+  static char s_gps_info_buf[768];
+  int local_hour = normalized_local_hour(gps.time.hour());
+  int hour12 = local_hour % 12;
+  if (hour12 == 0) hour12 = 12;
+  const char* ampm = (local_hour >= 12) ? "PM" : "AM";
+
+  char timebuf[20];
+  snprintf(timebuf, sizeof(timebuf), "%d:%02d:%02d %s",
+           hour12, gps.time.minute(), gps.time.second(), ampm);
+
+  int eff_off = effective_timezone_offset_hours();
+
+  snprintf(
+    s_gps_info_buf, sizeof(s_gps_info_buf),
+    "Lat: %.6f\n"
+    "Lon: %.6f\n"
+    "Alt (ft): %.1f\n"
+    "Speed (mph): %.1f\n"
+    "Heading: %.1f\n"
+    "Satellites: %u\n"
+    "HDOP: %.2f\n"
+    "Date: %u/%u/%u\n"
+    "Local (UTC%+d): %s",
+    gps.location.lat(),
+    gps.location.lng(),
+    (double)(gps.altitude.meters() * 3.28084),
+    (double)gps.speed.mph(),
+    (double)gps.course.deg(),
+    (unsigned)gps.satellites.value(),
+    (double)gps.hdop.hdop(),
+    (unsigned)gps.date.month(),
+    (unsigned)gps.date.day(),
+    (unsigned)gps.date.year(),
+    eff_off,
+    timebuf);
+
+  lv_label_set_text(gps_info_label, s_gps_info_buf);
+}
+
+// Time/date often decode before a 3D fix; show live status instead of a frozen "Waiting..." line.
+static void paint_gps_no_fix_label() {
+  if (gps_info_label == nullptr) return;
+
+  static char buf[576];
+  size_t n = 0;
+
+  n += snprintf(buf + n, sizeof(buf) - n, "No position fix yet.\n\n");
+
+  if (!gps_stream_detected) {
+    snprintf(buf + n, sizeof(buf) - n,
+             "No data on Serial.\n"
+             "Check: GPS TX -> ESP RX, 9600 baud,\n"
+             "shared UART0 vs USB debug.");
+    lv_label_set_text(gps_info_label, buf);
+    return;
+  }
+
+  n += snprintf(buf + n, sizeof(buf) - n, "NMEA OK — need sky view / more sats.\n\n");
+
+  if (gps.time.isValid()) {
+    int lh = normalized_local_hour(gps.time.hour());
+    int h12 = lh % 12;
+    if (h12 == 0) h12 = 12;
+    const char* ap = (lh >= 12) ? "PM" : "AM";
+    n += snprintf(buf + n, sizeof(buf) - n,
+                  "Local: %d:%02d:%02d %s\n",
+                  h12, gps.time.minute(), gps.time.second(), ap);
+    n += snprintf(buf + n, sizeof(buf) - n,
+                  "UTC:   %02d:%02d:%02d\n",
+                  gps.time.hour(), gps.time.minute(), gps.time.second());
+  } else {
+    n += snprintf(buf + n, sizeof(buf) - n, "Time: not decoded yet\n");
+  }
+
+  if (gps.date.isValid()) {
+    n += snprintf(buf + n, sizeof(buf) - n,
+                  "Date: %u/%u/%u\n",
+                  (unsigned)gps.date.month(),
+                  (unsigned)gps.date.day(),
+                  (unsigned)gps.date.year());
+  }
+
+  if (gps.satellites.isValid()) {
+    n += snprintf(buf + n, sizeof(buf) - n,
+                  "Satellites: %u\n", (unsigned)gps.satellites.value());
+  }
+  if (gps.hdop.isValid()) {
+    n += snprintf(buf + n, sizeof(buf) - n, "HDOP: %.2f\n", (double)gps.hdop.hdop());
+  }
+
+  lv_label_set_text(gps_info_label, buf);
 }
 
 void create_log_screen() {
+  clear_ui_refs_on_screen_change();
+
   lv_obj_t* screen = lv_obj_create(NULL);
   lv_obj_set_style_bg_color(screen, lv_color_hex(0x111111), LV_PART_MAIN);
 
@@ -446,7 +602,8 @@ void create_log_screen() {
 
   lv_obj_t* back_btn = add_back_button(screen);
 
-  kb_userdata_t* kb_data = new kb_userdata_t{ kb, submit_btn, nullptr, back_btn };
+  s_log_kb_userdata = { kb, submit_btn, nullptr, back_btn };
+  kb_userdata_t* kb_data = &s_log_kb_userdata;
   lv_obj_add_event_cb(kb, kb_event_cb, LV_EVENT_READY, kb_data);
   lv_obj_add_event_cb(kb, kb_event_cb, LV_EVENT_CANCEL, kb_data);
 
@@ -454,11 +611,31 @@ void create_log_screen() {
   lv_obj_add_event_cb(size_input, textarea_focused_cb, LV_EVENT_FOCUSED, kb_data);
   lv_obj_add_event_cb(weight_input, textarea_focused_cb, LV_EVENT_FOCUSED, kb_data);
 
-  lv_screen_load(screen);
+  replace_root_screen(screen);
+}
+
+struct CatchLineUd {
+  char line[192];
+};
+
+static void view_entry_del_btn_cb(lv_event_t* e) {
+  CatchLineUd* ud = (CatchLineUd*)lv_event_get_user_data(e);
+  lv_event_code_t code = lv_event_get_code(e);
+  if (code == LV_EVENT_CLICKED) {
+    if (!ud) return;
+    delete_entry(String(ud->line));
+    create_view_entries_screen();
+    return;
+  }
+  if (code == LV_EVENT_DELETE) {
+    free(ud);
+  }
 }
 
 // ===== View Entries Screen =====
 void create_view_entries_screen() {
+  clear_ui_refs_on_screen_change();
+
   lv_obj_t* screen = lv_obj_create(NULL);
   lv_obj_set_style_bg_color(screen, lv_color_hex(0x111111), LV_PART_MAIN);
 
@@ -476,14 +653,14 @@ void create_view_entries_screen() {
 
   if (!sd_mounted) {
     lv_label_set_text(lv_label_create(screen), "SD card error");
-    lv_screen_load(screen);
+    replace_root_screen(screen);
     return;
   }
 
   File file = SD.open("/catch_log.csv");
   if (!file) {
     lv_label_set_text(lv_label_create(screen), "No entries");
-    lv_screen_load(screen);
+    replace_root_screen(screen);
     return;
   }
 
@@ -504,25 +681,36 @@ void create_view_entries_screen() {
     lv_label_set_text(del_label, "Del");
     lv_obj_center(del_label);
 
-    String* line_copy = new String(line);
-    lv_obj_add_event_cb(del_btn, [](lv_event_t* e){
-      String* txt = (String*)lv_event_get_user_data(e);
-      delete_entry(*txt);
-      delete txt;
-      create_view_entries_screen();
-    }, LV_EVENT_CLICKED, line_copy);
+    CatchLineUd* ud = (CatchLineUd*)malloc(sizeof(CatchLineUd));
+    if (ud) {
+      strncpy(ud->line, line.c_str(), sizeof(ud->line) - 1);
+      ud->line[sizeof(ud->line) - 1] = '\0';
+      lv_obj_add_event_cb(del_btn, view_entry_del_btn_cb, LV_EVENT_ALL, ud);
+    }
 
     y += 35;
   }
   file.close();
 
   add_back_button(screen);
-  lv_screen_load(screen);
+  replace_root_screen(screen);
 }
 
 // ===== Other Screens =====
-void create_condition_screen() { lv_obj_t* screen = lv_obj_create(NULL); lv_obj_set_style_bg_color(screen, lv_color_hex(0x111111), LV_PART_MAIN); lv_obj_t* label = lv_label_create(screen); lv_label_set_text(label, "Condition Test Screen"); lv_obj_align(label, LV_ALIGN_TOP_MID, 0, 20); add_back_button(screen); lv_screen_load(screen); lv_obj_set_style_text_color(label, lv_color_hex(0xFFFFFF), LV_PART_MAIN);}
+void create_condition_screen() {
+  clear_ui_refs_on_screen_change();
+  lv_obj_t* screen = lv_obj_create(NULL);
+  lv_obj_set_style_bg_color(screen, lv_color_hex(0x111111), LV_PART_MAIN);
+  lv_obj_t* label = lv_label_create(screen);
+  lv_label_set_text(label, "Condition Test Screen");
+  lv_obj_align(label, LV_ALIGN_TOP_MID, 0, 20);
+  add_back_button(screen);
+  replace_root_screen(screen);
+  lv_obj_set_style_text_color(label, lv_color_hex(0xFFFFFF), LV_PART_MAIN);
+}
 void create_settings_screen() {
+  clear_ui_refs_on_screen_change();
+
   lv_obj_t* screen = lv_obj_create(NULL);
   lv_obj_set_style_bg_color(screen, lv_color_hex(0x111111), LV_PART_MAIN);
 
@@ -633,9 +821,11 @@ void create_settings_screen() {
 
   refresh_settings_labels();
   add_back_button(screen);
-  lv_screen_load(screen);
+  replace_root_screen(screen);
 }
 void create_about_screen() {
+  clear_ui_refs_on_screen_change();
+
   lv_obj_t* screen = lv_obj_create(NULL);
   lv_obj_set_style_bg_color(screen, lv_color_hex(0x111111), LV_PART_MAIN);
 
@@ -684,9 +874,19 @@ void create_about_screen() {
   lv_obj_align(info_label, LV_ALIGN_TOP_LEFT, 0, 0);
 
   add_back_button(screen);
-  lv_screen_load(screen);
+  replace_root_screen(screen);
 }
-void create_map_screen() { lv_obj_t* screen = lv_obj_create(NULL); lv_obj_set_style_bg_color(screen, lv_color_hex(0x111111), LV_PART_MAIN); lv_obj_t* label = lv_label_create(screen); lv_label_set_text(label, "Map Screen"); lv_obj_align(label, LV_ALIGN_TOP_MID, 0, 20); add_back_button(screen); lv_screen_load(screen); lv_obj_set_style_text_color(label, lv_color_hex(0xFFFFFF), LV_PART_MAIN);}
+void create_map_screen() {
+  clear_ui_refs_on_screen_change();
+  lv_obj_t* screen = lv_obj_create(NULL);
+  lv_obj_set_style_bg_color(screen, lv_color_hex(0x111111), LV_PART_MAIN);
+  lv_obj_t* label = lv_label_create(screen);
+  lv_label_set_text(label, "Map Screen");
+  lv_obj_align(label, LV_ALIGN_TOP_MID, 0, 20);
+  add_back_button(screen);
+  replace_root_screen(screen);
+  lv_obj_set_style_text_color(label, lv_color_hex(0xFFFFFF), LV_PART_MAIN);
+}
 
 // ===== Menu Button Callback =====
 void on_menu_button(lv_event_t* e) {
@@ -705,6 +905,8 @@ void on_menu_button(lv_event_t* e) {
 
 // ===== Main Menu =====
 void create_main_menu() {
+  clear_ui_refs_on_screen_change();
+
   lv_obj_t* screen = lv_obj_create(NULL);
   lv_obj_set_style_bg_color(screen, lv_color_hex(0x222222), LV_PART_MAIN);
 
@@ -712,26 +914,49 @@ void create_main_menu() {
   lv_label_set_text(title, "Fishing-Gyzmo");
   lv_obj_set_style_text_color(title, lv_color_hex(0x00FF00), LV_PART_MAIN);
   lv_obj_set_style_text_font(title, &my_font_28, LV_PART_MAIN);
-  lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 10);
+  lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 8);
+  lv_obj_set_style_opa(title, LV_OPA_TRANSP, LV_PART_MAIN);
+  {
+    lv_anim_t a;
+    lv_anim_init(&a);
+    lv_anim_set_var(&a, title);
+    lv_anim_set_exec_cb(&a, menu_btn_fade_anim_cb);
+    lv_anim_set_values(&a, LV_OPA_TRANSP, LV_OPA_COVER);
+    lv_anim_set_time(&a, 220);
+    lv_anim_set_delay(&a, 40);
+    lv_anim_set_path_cb(&a, lv_anim_path_ease_out);
+    lv_anim_start(&a);
+  }
+
+  lv_obj_t* menu_scroll = lv_obj_create(screen);
+  lv_obj_set_size(menu_scroll, 300, 186);
+  lv_obj_align(menu_scroll, LV_ALIGN_TOP_MID, 0, 46);
+  lv_obj_set_style_bg_opa(menu_scroll, LV_OPA_TRANSP, LV_PART_MAIN);
+  lv_obj_set_style_border_width(menu_scroll, 0, LV_PART_MAIN);
+  lv_obj_set_style_pad_left(menu_scroll, 4, LV_PART_MAIN);
+  lv_obj_set_style_pad_right(menu_scroll, 4, LV_PART_MAIN);
+  lv_obj_set_style_pad_top(menu_scroll, 6, LV_PART_MAIN);
+  lv_obj_set_style_pad_bottom(menu_scroll, 10, LV_PART_MAIN);
+  lv_obj_set_style_pad_row(menu_scroll, 14, LV_PART_MAIN);
+  lv_obj_set_scroll_dir(menu_scroll, LV_DIR_VER);
+  lv_obj_set_scrollbar_mode(menu_scroll, LV_SCROLLBAR_MODE_AUTO);
+  lv_obj_add_flag(menu_scroll, LV_OBJ_FLAG_SCROLL_ELASTIC);
+  lv_obj_set_scroll_snap_y(menu_scroll, LV_SCROLL_SNAP_NONE);
+  lv_obj_set_layout(menu_scroll, LV_LAYOUT_FLEX);
+  lv_obj_set_flex_flow(menu_scroll, LV_FLEX_FLOW_COLUMN);
+  lv_obj_set_flex_align(menu_scroll, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
 
   const char* menu_buttons[] = { "Condition Test", "Log Catch", "Map", "GPS Info", "Settings", "About", "View Entries"};
-  lv_obj_t* prev_btn = nullptr;
-  int start_y = 60;
-  int spacing = 20;
 
   for (int i = 0; i < 7; i++) {
-    lv_obj_t* btn = lv_button_create(screen);
-    lv_obj_set_size(btn, 200, 40);
-
-    if (!prev_btn)
-      lv_obj_align(btn, LV_ALIGN_TOP_MID, 0, start_y);
-    else
-      lv_obj_align_to(btn, prev_btn, LV_ALIGN_OUT_BOTTOM_MID, 0, spacing);
+    lv_obj_t* btn = lv_button_create(menu_scroll);
+    lv_obj_set_size(btn, 220, 42);
 
     lv_obj_set_style_bg_color(btn, lv_color_hex(0x00FF00), LV_PART_MAIN);
     lv_obj_set_style_bg_opa(btn, LV_OPA_COVER, LV_PART_MAIN);
     lv_obj_set_style_border_width(btn, 2, LV_PART_MAIN);
     lv_obj_set_style_border_color(btn, lv_color_hex(0x00AA00), LV_PART_MAIN);
+    lv_obj_set_style_opa(btn, LV_OPA_TRANSP, LV_PART_MAIN);
 
     lv_obj_t* label = lv_label_create(btn);
     lv_label_set_text(label, menu_buttons[i]);
@@ -739,10 +964,19 @@ void create_main_menu() {
     lv_obj_set_style_text_color(label, lv_color_hex(0x000000), LV_PART_MAIN);
 
     lv_obj_add_event_cb(btn, on_menu_button, LV_EVENT_CLICKED, NULL);
-    prev_btn = btn;
+
+    lv_anim_t a;
+    lv_anim_init(&a);
+    lv_anim_set_var(&a, btn);
+    lv_anim_set_exec_cb(&a, menu_btn_fade_anim_cb);
+    lv_anim_set_values(&a, LV_OPA_TRANSP, LV_OPA_COVER);
+    lv_anim_set_time(&a, 200);
+    lv_anim_set_delay(&a, (uint32_t)(80 + i * 55));
+    lv_anim_set_path_cb(&a, lv_anim_path_ease_out);
+    lv_anim_start(&a);
   }
 
-  lv_screen_load(screen);
+  replace_root_screen(screen, true);
 }
 
 // ===== Time Overlay (always on top) =====
@@ -759,6 +993,9 @@ void create_time_overlay() {
 
 // ===== Setup =====
 void setup() {
+#if defined(ARDUINO_ARCH_ESP32)
+  Serial.setRxBufferSize(2048);
+#endif
   Serial.begin(9600);   // NEO-6M GPS default baud
   Serial.println("Fishing Gyzmo Starting...");
   Serial.println("Initializing GPS on RX0/TX0...");
@@ -806,10 +1043,10 @@ void loop() {
     log_catch_safe(pending_species, pending_size, pending_weight);
   }
 
-  // ===== GPS Reader =====
+  // Drain all pending UART bytes each loop (NMEA must not be dropped). yield() periodically for WDT.
+  int serial_reads = 0;
   while (Serial.available()) {
-
-    char c = Serial.read();
+    char c = (char)Serial.read();
 
     if (!gps_stream_detected) {
       gps_stream_detected = true;
@@ -817,6 +1054,11 @@ void loop() {
     }
 
     gps.encode(c);
+    if ((++serial_reads & 0x3F) == 0) {
+#if defined(ARDUINO_ARCH_ESP32)
+      yield();
+#endif
+    }
   }
 
   // ===== Update Top-Right Time Overlay =====
@@ -836,7 +1078,8 @@ void loop() {
     }
   }
 
-  if (gps.location.isUpdated()) {
+  const bool gps_loc_new = gps.location.isUpdated();
+  if (gps_loc_new) {
     if (timezone_auto_enabled) {
       int computed_tz = compute_timezone_offset_from_longitude(gps.location.lng());
       if (computed_tz != timezone_offset_hours) {
@@ -847,70 +1090,23 @@ void loop() {
         refresh_settings_labels();
       }
     }
-    
-    if (gps_info_label != nullptr) {
+  }
 
-      String gps_text = "";
-
-      gps_text += "Lat: ";
-      gps_text += String(gps.location.lat(),6);
-      gps_text += "\n";
-
-      gps_text += "Lon: ";
-      gps_text += String(gps.location.lng(),6);
-      gps_text += "\n";
-
-      gps_text += "Alt (ft): ";
-      gps_text += String(gps.altitude.meters() * 3.28084);
-      gps_text += "\n";
-
-      gps_text += "Speed (mph): ";
-      gps_text += String(gps.speed.mph());
-      gps_text += "\n";
-
-      gps_text += "Heading: ";
-      gps_text += String(gps.course.deg());
-      gps_text += "\n";
-
-      gps_text += "Satellites: ";
-      gps_text += String(gps.satellites.value());
-      gps_text += "\n";
-
-      gps_text += "HDOP: ";
-      gps_text += String(gps.hdop.hdop());
-      gps_text += "\n";
-
-      gps_text += "Date: ";
-      gps_text += String(gps.date.month()) + "/";
-      gps_text += String(gps.date.day()) + "/";
-      gps_text += String(gps.date.year());
-      gps_text += "\n";
-
-      int local_hour = normalized_local_hour(gps.time.hour());
-
-      int hour12 = local_hour % 12;
-
-      if (hour12 == 0) {
-        hour12 = 12;
+  if (gps_info_label != nullptr) {
+    if (gps.location.isValid()) {
+      if (gps_loc_new || s_force_gps_label_paint) {
+        if (s_force_gps_label_paint) s_force_gps_label_paint = false;
+        paint_gps_summary_label();
       }
-
-      const char* ampm = (local_hour >= 12) ? "PM" : "AM";
-     
-      char timebuf[12];
-      sprintf(timebuf, "%d:%02d:%02d %s",
-              hour12,
-              gps.time.minute(),
-              gps.time.second(),
-              ampm);
-
-      int eff_off = effective_timezone_offset_hours();
-      gps_text += "Local (UTC";
-      if (eff_off >= 0) gps_text += "+";
-      gps_text += String(eff_off);
-      gps_text += "): ";
-      gps_text += timebuf;
-
-      lv_label_set_text(gps_info_label, gps_text.c_str());
+    } else {
+      // No lat/lon fix yet — still refresh page (time/sats/HDOP) so it matches the corner clock.
+      static uint32_t last_no_fix_paint_ms = 0;
+      uint32_t now = millis();
+      if (s_force_gps_label_paint || now - last_no_fix_paint_ms >= 250u) {
+        last_no_fix_paint_ms = now;
+        if (s_force_gps_label_paint) s_force_gps_label_paint = false;
+        paint_gps_no_fix_label();
+      }
     }
   }
 
@@ -919,5 +1115,8 @@ void loop() {
     Serial.println("GPS satellite fix acquired.");
   }
 
+#if defined(ARDUINO_ARCH_ESP32)
+  yield();
+#endif
   delay(1);
 }
